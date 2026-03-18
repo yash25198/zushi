@@ -4,6 +4,8 @@ A one-click Zcash regtest development environment. Inspired by [nigiri](https://
 
 `zushi` spins up a full `zcashd` regtest node inside Docker, mines initial blocks so the wallet is funded, and gives you a simple CLI to interact with it. No configuration needed.
 
+![Dashboard](assets/explorer-dashboard.png)
+
 ---
 
 ## Prerequisites
@@ -172,15 +174,28 @@ goreleaser --snapshot --skip-publish --rm-dist
 
 `zushi start` includes a built-in block explorer at **http://localhost:5001**.
 
-Features:
-- **Dashboard** -- block height, chain supply, difficulty (auto-refreshes)
+### Block detail -- transaction type badges
+
+Every transaction is tagged by type: `coinbase` (yellow), `transparent` (grey), `shielding` (purple), `unshielding` (green), `shielded` (purple), with transparent and shielded in/out counts.
+
+![Block detail](assets/explorer-block.png)
+
+### Transaction detail -- shielded components
+
+Full breakdown of transparent inputs/outputs, Sapling spends (nullifiers), Sapling outputs (commitments), and block number.
+
+![Transaction detail](assets/explorer-tx.png)
+
+### Features
+
+- **Dashboard** -- block height, chain supply, difficulty (auto-refreshes every 5s)
 - **Block list** -- latest 20 blocks with tx counts
-- **Block detail** -- all transactions with tagged badges:
-  - `coinbase` (yellow) for miner rewards
-  - `shielded in:N out:N` (purple) for Sapling/Orchard transactions
-- **Transaction detail** -- transparent inputs/outputs with full addresses, shielded spends/outputs with nullifiers and commitments, block number
+- **Block detail** -- all transactions with type badges and in/out counts
+- **Transaction detail** -- transparent I/O with full addresses, shielded spends/outputs with nullifiers and commitments, block number
 - **Address lookup** -- balance for both transparent and shielded addresses
 - **Search** -- by block height, block hash, txid, or address
+- **Click-to-copy** on all hashes, txids, and addresses
+- **Navigation history** -- back button returns to previous view, not just the homepage
 
 ## How it compares to nigiri
 
