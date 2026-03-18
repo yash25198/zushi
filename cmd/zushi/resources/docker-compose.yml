@@ -1,0 +1,44 @@
+name: zushi
+services:
+  # Zcash full node in regtest mode
+  zcashd:
+    image: electriccoinco/zcashd:latest
+    platform: linux/amd64
+    container_name: zcashd
+    restart: on-failure
+    stop_grace_period: 30s
+    ports:
+      - 18232:18232
+      - 18233:18233
+    volumes:
+      - zcashd-data:/srv/zcashd/.zcash
+      - ./zcash.conf:/srv/zcashd/.zcash/zcash.conf
+
+  # Lightwalletd - gRPC server for light wallets
+  lightwalletd:
+    image: electriccoinco/lightwalletd:latest
+    platform: linux/amd64
+    container_name: lightwalletd
+    restart: on-failure
+    depends_on:
+      - zcashd
+    ports:
+      - 9067:9067
+    command:
+      - --no-tls-very-insecure
+      - --grpc-bind-addr=0.0.0.0:9067
+      - --zcash-conf-path=/srv/zcashd/.zcash/zcash.conf
+      - --data-dir=/var/lib/lightwalletd/db
+      - --log-file=/dev/stdout
+      - --log-level=7
+    volumes:
+      - zcashd-data:/srv/zcashd/.zcash:ro
+      - lightwalletd-data:/var/lib/lightwalletd
+
+volumes:
+  zcashd-data:
+  lightwalletd-data:
+
+networks:
+  default:
+    name: zushi
