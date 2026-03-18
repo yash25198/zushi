@@ -76,6 +76,11 @@
   .back-btn { color: var(--dim); cursor: pointer; font-size: 13px; margin-bottom: 16px; display: inline-block; }
   .back-btn:hover { color: var(--text); }
 
+  .page-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; font-family: var(--mono); }
+  .page-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .page-btn:disabled { opacity: 0.3; cursor: default; border-color: var(--border); color: var(--dim); }
+  .page-info { color: var(--dim); font-size: 13px; font-family: var(--mono); }
+
   .empty { text-align: center; padding: 40px; color: var(--dim); }
   .loader { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -95,7 +100,7 @@
 
     <header>
       <div class="container">
-        <div class="logo"><span>zu</span>shi explorer</div>
+        <div class="logo" style="cursor:pointer" onclick="navStack.length=0;showMain()"><span>zu</span>shi explorer</div>
         <div class="chain-badge">regtest</div>
       </div>
     </header>
@@ -123,6 +128,7 @@
             id="block-count"></span></div>
         <div class="card" id="blocks-list"><div class="empty"><div
               class="loader"></div></div></div>
+        <div id="blocks-pagination" style="display:none;margin-top:12px;display:flex;justify-content:center;gap:12px;align-items:center"></div>
       </div>
 
       <div id="detail-view">
@@ -146,6 +152,7 @@ function goBack() {
   if (prev.type === 'block') showBlock(prev.id);
   else if (prev.type === 'tx') showTx(prev.id);
   else if (prev.type === 'address') showAddress(prev.id);
+  else if (prev.type === 'search') searchNullifierOrCommitment(prev.id);
   else showMain();
 }
 
@@ -169,7 +176,9 @@ function copyLink(val, onclick) {
 
 async function api(path) {
   const r = await fetch(path);
-  return r.json();
+  const data = await r.json();
+  if (data && data.error) throw new Error(data.error);
+  return data;
 }
 
 async function loadInfo() {
@@ -182,12 +191,21 @@ async function loadInfo() {
   } catch(e) { console.error(e); }
 }
 
-async function loadBlocks() {
+const PAGE_SIZE = 20;
+let currentPage = 0;
+
+async function loadBlocks(page) {
+  if (page !== undefined) currentPage = page;
+  const offset = currentPage * PAGE_SIZE;
   try {
-    const blocks = await api('/api/blocks');
-    $('#block-count').textContent = blocks.length;
+    const data = await api(`/api/blocks?offset=${offset}&limit=${PAGE_SIZE}`);
+    const blocks = data.blocks || [];
+    const total = data.total || 0;
+    const totalPages = Math.ceil(total / PAGE_SIZE);
+
+    $('#block-count').textContent = total;
     const el = $('#blocks-list');
-    if (!blocks.length) { el.innerHTML = '<div class="empty">No blocks found</div>'; return; }
+    if (!blocks.length) { el.innerHTML = '<div class="empty">No blocks found</div>'; renderPagination(0,0); return; }
     el.innerHTML = blocks.map(b => `
       <div class="block-row" style="cursor:pointer" onclick="showBlock('${b.hash}')">
         <span class="block-height">${b.height}</span>
@@ -196,10 +214,26 @@ async function loadBlocks() {
         <span class="block-time">${new Date(b.time * 1000).toLocaleTimeString()}</span>
       </div>
     `).join('');
+    renderPagination(totalPages, total);
   } catch(e) { console.error(e); }
 }
 
-async function showBlock(hashOrHeight) {
+function renderPagination(totalPages, total) {
+  const pg = $('#blocks-pagination');
+  if (totalPages <= 1) { pg.style.display = 'none'; return; }
+  pg.style.display = 'flex';
+  const first = currentPage * PAGE_SIZE + 1;
+  const last = Math.min((currentPage + 1) * PAGE_SIZE, total);
+  pg.innerHTML = `
+    <button class="page-btn" onclick="loadBlocks(0)" ${currentPage === 0 ? 'disabled' : ''}>&laquo;</button>
+    <button class="page-btn" onclick="loadBlocks(${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>&lsaquo; Prev</button>
+    <span class="page-info">${first}-${last} of ${total}</span>
+    <button class="page-btn" onclick="loadBlocks(${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next &rsaquo;</button>
+    <button class="page-btn" onclick="loadBlocks(${totalPages - 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>&raquo;</button>
+  `;
+}
+
+async function showBlock(hashOrHeight, fromSearch) {
   pushNav('block', hashOrHeight);
   $('#detail-view').style.display = 'block';
   $('#main-view').style.display = 'none';
@@ -270,11 +304,15 @@ async function showBlock(hashOrHeight) {
       <div class="card">${txHtml}</div>
     `;
   } catch(e) {
+    if (fromSearch) {
+      navStack.pop();
+      throw e;
+    }
     $('#detail-content').innerHTML = `<div class="empty">Block not found: ${e.message}</div>`;
   }
 }
 
-async function showTx(txid) {
+async function showTx(txid, fromSearch) {
   pushNav('tx', txid);
   $('#detail-view').style.display = 'block';
   $('#main-view').style.display = 'none';
@@ -400,6 +438,11 @@ async function showTx(txid) {
       ${shieldedHtml}
     `;
   } catch(e) {
+    // If called from search chain, undo nav and re-throw so next handler runs
+    if (fromSearch) {
+      navStack.pop();
+      throw e;
+    }
     $('#detail-content').innerHTML = `<div class="empty">Transaction not found: ${e.message}</div>`;
   }
 }
@@ -411,6 +454,43 @@ async function showAddress(addr) {
   $('#detail-content').innerHTML = '<div class="empty"><div class="loader"></div></div>';
   try {
     const info = await api('/api/address/' + addr);
+
+    const utxos = info.utxos || [];
+    const utxoTotal = utxos.reduce((s, u) => s + u.amount, 0);
+    let utxoHtml = '';
+    if (utxos.length > 0) {
+      const rows = utxos.map((u, i) => {
+        const conf = u.confirmations || 0;
+        const mature = u.generated ? (conf >= 100 ? 'mature' : 'immature') : '';
+        const matureBadge = mature === 'immature'
+          ? '<span class="tx-pill" style="color:var(--yellow);border-color:var(--yellow)">immature</span>'
+          : mature === 'mature'
+            ? '<span class="tx-pill" style="color:var(--green);border-color:var(--green)">mature</span>'
+            : '';
+        const coinbaseBadge = u.generated ? '<span class="tx-pill" style="color:var(--yellow);border-color:var(--yellow)">coinbase</span>' : '';
+        return `<div class="io-row">
+          <span class="io-index">#${i}</span>
+          <div class="io-details">
+            <div class="io-addr">${copyLink(u.txid, "showTx('"+u.txid+"')")}</div>
+            <div class="io-meta">
+              <span class="tx-pill amount">${u.amount} ZEC</span>
+              <span class="tx-pill" style="color:var(--dim)">vout:${u.vout}</span>
+              <span class="tx-pill" style="color:var(--dim)">${conf} confs</span>
+              ${coinbaseBadge}${matureBadge}
+              ${u.spendable ? '<span class="tx-pill" style="color:var(--green);border-color:var(--green)">spendable</span>' : '<span class="tx-pill" style="color:var(--red);border-color:var(--red)">locked</span>'}
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+      utxoHtml = `
+        <div class="section-title">UTXOs <span class="count">${utxos.length}</span></div>
+        <div class="card"><div class="card-body">${rows}</div></div>`;
+    } else {
+      utxoHtml = `
+        <div class="section-title">UTXOs <span class="count">0</span></div>
+        <div class="card"><div class="card-body"><div style="color:var(--dim);padding:8px">No unspent outputs for this address</div></div></div>`;
+    }
+
     $('#detail-content').innerHTML = `
       <div class="section-title">Address</div>
       <div class="card"><div class="card-body">
@@ -418,25 +498,65 @@ async function showAddress(addr) {
           <span class="detail-key">Address</span><span class="detail-val">${copyEl(info.address)}</span>
           <span class="detail-key">Balance</span><span class="detail-val" style="color:var(--green)">${info.balance} ZEC</span>
           ${info.totalReceived !== undefined ? `<span class="detail-key">Total Received</span><span class="detail-val">${info.totalReceived} ZEC</span>` : ''}
+          ${utxos.length > 0 ? `<span class="detail-key">UTXO Total</span><span class="detail-val" style="color:var(--green)">${utxoTotal} ZEC</span>` : ''}
+          ${utxos.length > 0 ? `<span class="detail-key">UTXOs</span><span class="detail-val">${utxos.length}</span>` : ''}
         </div>
       </div></div>
+      ${utxoHtml}
     `;
   } catch(e) {
     $('#detail-content').innerHTML = `<div class="empty">Address not found: ${e.message}</div>`;
   }
 }
 
+async function searchNullifierOrCommitment(q) {
+  const results = await api('/api/search/' + q);
+  if (!results || results.length === 0) throw new Error('not found');
+  const r = results[0];
+  pushNav('search', q);
+  $('#detail-view').style.display = 'block';
+  $('#main-view').style.display = 'none';
+  $('#detail-content').innerHTML = `
+    <div class="section-title">Search Result</div>
+    <div class="card"><div class="card-body">
+      <div class="detail-grid">
+        <span class="detail-key">Query</span><span class="detail-val">${copyEl(q)}</span>
+        <span class="detail-key">Type</span><span class="detail-val"><span class="tx-pill shielded">${r.type.replace('_',' ')}</span></span>
+        <span class="detail-key">Found in TX</span><span class="detail-val">${copyLink(r.txid, "showTxReplace('"+r.txid+"')")}</span>
+        <span class="detail-key">Block</span><span class="detail-val"><a href="#" onclick="event.preventDefault();showBlock(${r.block})" style="color:var(--accent);font-weight:700">#${r.block}</a></span>
+        <span class="detail-key">Index</span><span class="detail-val">#${r.index}</span>
+      </div>
+    </div></div>
+    <div style="margin-top:12px">
+      <button class="page-btn" onclick="showTxReplace('${r.txid}')">View Full Transaction</button>
+    </div>
+  `;
+}
+
+// Replace current nav entry (search result) with the tx view instead of stacking
+function showTxReplace(txid) {
+  navStack.pop(); // remove the search result entry
+  showTx(txid);   // pushes tx entry
+}
+
 function doSearch() {
   const q = $('#search-input').value.trim();
   if (!q) return;
   if (q.length === 64) {
-    showTx(q).catch(() => showBlock(q));
+    // Could be txid, block hash, or nullifier/commitment
+    showTx(q, true).catch(() => showBlock(q, true).catch(() => searchNullifierOrCommitment(q).catch(() => {
+      showMain();
+      alert('Nothing found for: ' + q);
+    })));
   } else if (/^\d+$/.test(q)) {
     showBlock(q);
   } else if (q.startsWith('tm') || q.startsWith('t1') || q.startsWith('zs') || q.startsWith('zregtest')) {
     showAddress(q);
   } else {
-    showTx(q).catch(() => showBlock(q).catch(() => showAddress(q)));
+    showTx(q, true).catch(() => showBlock(q, true).catch(() => showAddress(q).catch(() => searchNullifierOrCommitment(q).catch(() => {
+      showMain();
+      alert('Nothing found for: ' + q);
+    }))));
   }
 }
 
@@ -448,8 +568,8 @@ function showMain() {
 }
 
 loadInfo();
-loadBlocks();
-setInterval(() => { loadInfo(); loadBlocks(); }, 5000);
+loadBlocks(0);
+setInterval(() => { loadInfo(); if (currentPage === 0) loadBlocks(); }, 5000);
 </script>
   </body>
 </html>

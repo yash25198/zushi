@@ -47,6 +47,7 @@ func main() {
 	http.HandleFunc("/api/address/", handleAddress)
 	http.HandleFunc("/api/mempool", handleMempool)
 	http.HandleFunc("/api/info", handleInfo)
+	http.HandleFunc("/api/search/", handleSearch)
 
 	log.Printf("zushi explorer listening on %s", listen)
 	if err := http.ListenAndServe(listen, nil); err != nil {
@@ -94,9 +95,24 @@ func handleBlocks(w http.ResponseWriter, r *http.Request) {
 	var height int
 	json.Unmarshal([]byte(countRaw), &height)
 
+	// Pagination: ?offset=0&limit=20
 	limit := 20
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+		if limit < 1 {
+			limit = 1
+		} else if limit > 100 {
+			limit = 100
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		fmt.Sscanf(v, "%d", &offset)
+	}
+
+	startHeight := height - offset
 	blocks := make([]json.RawMessage, 0, limit)
-	for i := height; i >= 0 && len(blocks) < limit; i-- {
+	for i := startHeight; i >= 0 && len(blocks) < limit; i-- {
 		hashRaw, err := rpcCall("getblockhash", []interface{}{i})
 		if err != nil {
 			break
@@ -111,8 +127,17 @@ func handleBlocks(w http.ResponseWriter, r *http.Request) {
 		blocks = append(blocks, json.RawMessage(blockRaw))
 	}
 
+	// Wrap response with pagination metadata
+	resp := map[string]interface{}{
+		"blocks":  blocks,
+		"total":   height + 1,
+		"offset":  offset,
+		"limit":   limit,
+		"hasMore": (offset + limit) <= height,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	out, _ := json.Marshal(blocks)
+	out, _ := json.Marshal(resp)
 	w.Write(out)
 }
 
@@ -168,22 +193,34 @@ func handleAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try z_getbalance for both transparent and shielded addresses
-	balRaw, err := rpcCall("z_getbalance", []interface{}{addr})
+	// Try z_getbalance for both transparent and shielded addresses (minconf=1)
+	balRaw, err := rpcCall("z_getbalance", []interface{}{addr, 1})
 	if err != nil {
 		jsonErr(w, err.Error(), 404)
 		return
 	}
 
+	// Also get unconfirmed balance
+	unconfBalRaw, _ := rpcCall("z_getbalance", []interface{}{addr, 0})
+
 	// Get received by address (transparent only)
 	receivedRaw, _ := rpcCall("getreceivedbyaddress", []interface{}{addr, 0})
+
+	// Get UTXOs for transparent addresses (minconf=0 to include unconfirmed)
+	utxosRaw, _ := rpcCall("listunspent", []interface{}{0, 9999999, []string{addr}})
 
 	resp := map[string]json.RawMessage{
 		"address": json.RawMessage(fmt.Sprintf("%q", addr)),
 		"balance": json.RawMessage(balRaw),
 	}
+	if unconfBalRaw != "" {
+		resp["unconfirmedBalance"] = json.RawMessage(unconfBalRaw)
+	}
 	if receivedRaw != "" {
 		resp["totalReceived"] = json.RawMessage(receivedRaw)
+	}
+	if utxosRaw != "" && utxosRaw != "null" {
+		resp["utxos"] = json.RawMessage(utxosRaw)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -199,6 +236,96 @@ func handleMempool(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(result))
+}
+
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimPrefix(r.URL.Path, "/api/search/")
+	if query == "" {
+		jsonErr(w, "missing search query", 400)
+		return
+	}
+
+	// Get current height
+	countRaw, err := rpcCall("getblockcount", nil)
+	if err != nil {
+		jsonErr(w, err.Error(), 500)
+		return
+	}
+	var height int
+	json.Unmarshal([]byte(countRaw), &height)
+
+	// Scan all blocks (regtest chains are small)
+	maxScan := height + 1
+
+	type SearchResult struct {
+		Type  string `json:"type"`
+		TXID  string `json:"txid"`
+		Block int    `json:"block"`
+		Index int    `json:"index"`
+	}
+
+	var results []SearchResult
+
+	for i := height; i >= 0 && len(results) == 0 && (height-i) < maxScan; i-- {
+		hashRaw, err := rpcCall("getblockhash", []interface{}{i})
+		if err != nil {
+			break
+		}
+		var hash string
+		json.Unmarshal([]byte(hashRaw), &hash)
+
+		blockRaw, err := rpcCall("getblock", []interface{}{hash, 2})
+		if err != nil {
+			break
+		}
+
+		var block struct {
+			Height int `json:"height"`
+			Tx     []struct {
+				TXID           string `json:"txid"`
+				VShieldedSpend []struct {
+					Nullifier string `json:"nullifier"`
+				} `json:"vShieldedSpend"`
+				VShieldedOutput []struct {
+					Cmu string `json:"cmu"`
+				} `json:"vShieldedOutput"`
+				Orchard *struct {
+					Actions []struct {
+						Nullifier string `json:"nullifier"`
+						Cmx       string `json:"cmx"`
+					} `json:"actions"`
+				} `json:"orchard"`
+			} `json:"tx"`
+		}
+		json.Unmarshal([]byte(blockRaw), &block)
+
+		for _, tx := range block.Tx {
+			for idx, s := range tx.VShieldedSpend {
+				if s.Nullifier == query {
+					results = append(results, SearchResult{"sapling_nullifier", tx.TXID, block.Height, idx})
+				}
+			}
+			for idx, s := range tx.VShieldedOutput {
+				if s.Cmu == query {
+					results = append(results, SearchResult{"sapling_commitment", tx.TXID, block.Height, idx})
+				}
+			}
+			if tx.Orchard != nil {
+				for idx, a := range tx.Orchard.Actions {
+					if a.Nullifier == query {
+						results = append(results, SearchResult{"orchard_nullifier", tx.TXID, block.Height, idx})
+					}
+					if a.Cmx == query {
+						results = append(results, SearchResult{"orchard_commitment", tx.TXID, block.Height, idx})
+					}
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	out, _ := json.Marshal(results)
+	w.Write(out)
 }
 
 func rpcCall(method string, params []interface{}) (string, error) {
