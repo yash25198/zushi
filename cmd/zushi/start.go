@@ -22,12 +22,19 @@ var lightwalletdFlag = cli.BoolFlag{
 	Value: false,
 }
 
+var headlessFlag = cli.BoolFlag{
+	Name:  "headless",
+	Usage: "start without the block explorer",
+	Value: false,
+}
+
 var startCmd = cli.Command{
 	Name:   "start",
 	Usage:  "start zushi",
 	Action: startAction,
 	Flags: []cli.Flag{
 		&lightwalletdFlag,
+		&headlessFlag,
 	},
 }
 
@@ -43,6 +50,10 @@ func startAction(ctx *cli.Context) error {
 
 	if ctx.Bool("lightwalletd") {
 		services = append(services, "lightwalletd")
+	}
+
+	if !ctx.Bool("headless") {
+		services = append(services, "explorer")
 	}
 
 	bashCmd := runDockerCompose(composePath, append([]string{"up", "-d"}, services...)...)

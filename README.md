@@ -31,6 +31,9 @@ cp ./build/zushi-* /usr/local/bin/zushi
 # Start the environment (first run pulls images + zcash params, ~2 min)
 zushi start
 
+# Open the block explorer
+open http://localhost:5001
+
 # Check the chain
 zushi rpc getblockchaininfo
 
@@ -60,7 +63,8 @@ zushi stop --delete
 
 | Command | Description |
 |---|---|
-| `zushi start` | Start zcashd in regtest, mine 101 blocks, fund the wallet |
+| `zushi start` | Start zcashd in regtest + block explorer, mine 101 blocks, fund the wallet |
+| `zushi start --headless` | Start without the block explorer |
 | `zushi start --lightwalletd` | Also start [lightwalletd](https://github.com/zcash/lightwalletd) (gRPC on `:9067`) |
 | `zushi stop` | Stop containers (data persists) |
 | `zushi stop --delete` | Stop and wipe all data + volumes |
@@ -69,7 +73,7 @@ zushi stop --delete
 | `zushi generate [n]` | Mine `n` blocks (default: 1) |
 | `zushi push <hex>` | Broadcast a raw transaction and mine a block |
 | `zushi shield [zaddr]` | Shield coinbase ZEC to a shielded address via `z_shieldcoinbase` |
-| `zushi logs <service>` | Tail container logs (`zcashd`, `lightwalletd`) |
+| `zushi logs <service>` | Tail container logs (`zcashd`, `lightwalletd`, `explorer`) |
 | `zushi update` | Pull latest Docker images |
 | `zushi version` | Print version info |
 
@@ -78,6 +82,7 @@ zushi stop --delete
 | Service | Image | Ports | Purpose |
 |---|---|---|---|
 | `zcashd` | `electriccoinco/zcashd` | `18232` (RPC), `18233` (P2P) | Full node in regtest mode |
+| `explorer` | built from `explorer/` | `5001` (HTTP) | Block explorer web UI |
 | `lightwalletd` | `electriccoinco/lightwalletd` | `9067` (gRPC) | Light wallet server (opt-in) |
 
 ## Endpoints
@@ -86,6 +91,7 @@ After `zushi start`:
 
 ```
 zcashd RPC     http://localhost:18232  (user: zcashrpc, pass: zcashpass)
+explorer       http://localhost:5001   (block explorer)
 lightwalletd   localhost:9067          (gRPC, --lightwalletd flag)
 ```
 
@@ -119,6 +125,11 @@ zushi (Go CLI)
   |       +-- electriccoinco/zcashd:latest (regtest)
   |              ports: 18232, 18233
   |
+  |-- docker compose up -d explorer
+  |       |
+  |       +-- zushi-explorer (Go + embedded HTML)
+  |              port: 5001  -->  zcashd RPC
+  |
   |-- docker compose up -d lightwalletd  (optional)
   |       |
   |       +-- electriccoinco/lightwalletd:latest
@@ -128,7 +139,7 @@ zushi (Go CLI)
         docker exec zcashd zcash-cli -regtest ...
 ```
 
-The CLI embeds the `docker-compose.yml` and `zcash.conf` as Go embedded resources. On first run, these are copied to the data directory and used to orchestrate containers.
+The CLI embeds the `docker-compose.yml`, `zcash.conf`, and the explorer source as Go embedded resources. On first run, these are copied to the data directory and used to orchestrate containers. The explorer image is built locally from its Dockerfile on first `zushi start`.
 
 ## Development
 
@@ -157,13 +168,28 @@ Uses [goreleaser](https://goreleaser.com/) for cross-platform builds:
 goreleaser --snapshot --skip-publish --rm-dist
 ```
 
+## Block Explorer
+
+`zushi start` includes a built-in block explorer at **http://localhost:5001**.
+
+Features:
+- **Dashboard** -- block height, chain supply, difficulty (auto-refreshes)
+- **Block list** -- latest 20 blocks with tx counts
+- **Block detail** -- all transactions with tagged badges:
+  - `coinbase` (yellow) for miner rewards
+  - `shielded in:N out:N` (purple) for Sapling/Orchard transactions
+- **Transaction detail** -- transparent inputs/outputs with full addresses, shielded spends/outputs with nullifiers and commitments, block number
+- **Address lookup** -- balance for both transparent and shielded addresses
+- **Search** -- by block height, block hash, txid, or address
+
 ## How it compares to nigiri
 
 [nigiri](https://github.com/vulpemventures/nigiri) is a Bitcoin/Liquid regtest box. zushi is the same idea for Zcash, with additions specific to the Zcash protocol:
 
+- **Built-in block explorer** with shielded transaction support (Sapling spends/outputs, Orchard actions)
 - **`shield`** command for `z_shieldcoinbase` (move transparent funds to shielded pool)
 - **`generate`** command for quick block mining
-- All Zcash network upgrades (Sapling, Orchard, etc.) active from block 1
+- All Zcash network upgrades (Overwinter through NU5) active from block 1
 - Opt-in `lightwalletd` for testing light wallet integrations
 
 ## License

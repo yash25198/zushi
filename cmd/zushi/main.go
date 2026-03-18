@@ -32,6 +32,9 @@ var datadirFlag = cli.StringFlag{
 
 //go:embed resources/docker-compose.yml
 //go:embed resources/zcash.conf
+//go:embed resources/explorer/main.go
+//go:embed resources/explorer/index.html
+//go:embed resources/explorer/Dockerfile
 var f embed.FS
 
 func main() {
@@ -127,6 +130,21 @@ func provisionResourcesToDatadir(datadir string) error {
 		uid, gid,
 	); err != nil {
 		return err
+	}
+
+	// Copy explorer files
+	explorerDir := filepath.Join(datadir, "explorer")
+	if err := makeDirectoryIfNotExists(explorerDir, uid, gid); err != nil {
+		return err
+	}
+	for _, name := range []string{"main.go", "index.html", "Dockerfile"} {
+		if err := copyFromResourcesToDatadir(
+			filepath.Join("resources", "explorer", name),
+			filepath.Join(explorerDir, name),
+			uid, gid,
+		); err != nil {
+			return err
+		}
 	}
 
 	if err := nigiriState.Set(map[string]string{"ready": strconv.FormatBool(true)}); err != nil {
