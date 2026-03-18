@@ -31,14 +31,30 @@ func stopAction(ctx *cli.Context) error {
 
 	bashCmd := runDockerCompose(composePath, "stop")
 	if deleteData {
-		bashCmd = runDockerCompose(composePath, "down", "--volumes")
+		bashCmd = runDockerCompose(composePath, "down", "--volumes", "--remove-orphans")
 	}
 
 	bashCmd.Stdout = os.Stdout
 	bashCmd.Stderr = os.Stderr
 
 	if err := bashCmd.Run(); err != nil {
-		return err
+		// If down fails, force-remove known containers
+		if deleteData {
+			for _, name := range []string{"zcashd", "zushi-explorer", "lightwalletd"} {
+				rm := exec.Command("docker", "rm", "-f", name)
+				rm.Run()
+			}
+		} else {
+			return err
+		}
+	}
+
+	// Always force-remove named containers on --delete to avoid conflicts on next start
+	if deleteData {
+		for _, name := range []string{"zcashd", "zushi-explorer", "lightwalletd"} {
+			rm := exec.Command("docker", "rm", "-f", name)
+			rm.Run()
+		}
 	}
 
 	if deleteData {
