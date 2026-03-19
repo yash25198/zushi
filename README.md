@@ -16,8 +16,6 @@ A one-click Zcash regtest development environment. Inspired by [nigiri](https://
 ## Install
 
 ```bash
-git clone https://github.com/ysh/zushi.git
-cd zushi
 make build
 ```
 
@@ -54,6 +52,9 @@ zushi shield
 # Check balances (transparent + private)
 zushi rpc z_gettotalbalance
 
+# Auto-mine at mainnet cadence (1 block every 75s)
+zushi mine
+
 # Done for the day
 zushi stop
 
@@ -73,6 +74,7 @@ zushi stop --delete
 | `zushi rpc <cmd> [args]` | Run any `zcash-cli` command |
 | `zushi faucet <addr> [amt]` | Send ZEC to an address and auto-mine a block |
 | `zushi generate [n]` | Mine `n` blocks (default: 1) |
+| `zushi mine` | Auto-mine blocks at a fixed interval (default: 75s, like mainnet) |
 | `zushi push <hex>` | Broadcast a raw transaction and mine a block |
 | `zushi shield [zaddr]` | Shield coinbase ZEC to a shielded address via `z_shieldcoinbase` |
 | `zushi logs <service>` | Tail container logs (`zcashd`, `lightwalletd`, `explorer`) |
@@ -112,6 +114,23 @@ Override with `--datadir`:
 ```bash
 zushi --datadir /tmp/my-zcash start
 ```
+
+### Auto-mining
+
+`zushi mine` runs in the foreground and mines blocks at a fixed interval, simulating mainnet's block cadence:
+
+```bash
+# Mainnet cadence (1 block every 75 seconds)
+zushi mine
+
+# Faster for development
+zushi mine -i 10
+
+# 5 blocks every 30 seconds, stop after 20 rounds
+zushi mine -i 30 -n 5 --limit 20
+```
+
+Note: regtest does not run real Digishield difficulty adjustment -- difficulty stays at 1 regardless of block intervals. This simulates the timing but not the mining economics.
 
 ### Regtest node config
 

@@ -56,6 +56,7 @@ func main() {
 		&pushCmd,
 		&generateCmd,
 		&shieldCmd,
+		&mineCmd,
 	}
 
 	app.Before = func(ctx *cli.Context) error {
