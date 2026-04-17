@@ -43,6 +43,9 @@ zushi rpc getnewaddress
 # Send 10 ZEC to it
 zushi faucet <address> 10
 
+# Send 10 ZEC to a shielded/unified address
+zushi faucet --shielded <zaddr> 10
+
 # Mine 5 more blocks
 zushi generate 5
 
@@ -72,7 +75,7 @@ zushi stop --delete
 | `zushi stop` | Stop containers (data persists) |
 | `zushi stop --delete` | Stop and wipe all data + volumes |
 | `zushi rpc <cmd> [args]` | Run any `zcash-cli` command |
-| `zushi faucet <addr> [amt]` | Send ZEC to an address and auto-mine a block |
+| `zushi faucet [--shielded] <addr> [amt]` | Send ZEC to an address and auto-mine a block. `--shielded` routes via `z_sendmany` for unified/sapling addresses |
 | `zushi generate [n]` | Mine `n` blocks (default: 1) |
 | `zushi mine` | Auto-mine blocks at a fixed interval (default: 75s, like mainnet) |
 | `zushi push <hex>` | Broadcast a raw transaction and mine a block |
