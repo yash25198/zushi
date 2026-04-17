@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -103,15 +104,32 @@ func startAction(ctx *cli.Context) error {
 
 showEndpoints:
 	if zcashdReady {
-		// Mine initial blocks so the wallet has funds
+		// Mine initial blocks so the wallet has funds. 110 (not 101) so that
+		// at least 10 coinbase outputs reach the 100-conf maturity threshold
+		// — z_shieldcoinbase only selects mature coinbase, and a single
+		// mature utxo (~6.25 ZEC) is tight for repeated faucet calls.
 		fmt.Println("Mining initial blocks for regtest wallet funding...")
 		mineCmd := exec.Command("docker", "exec", "zcashd", "zcash-cli", "-regtest",
-			"-rpcuser=zcashrpc", "-rpcpassword=zcashpass", "generate", "101")
+			"-rpcuser=zcashrpc", "-rpcpassword=zcashpass", "generate", "110")
 		mineOut, err := mineCmd.CombinedOutput()
 		if err != nil {
 			fmt.Printf("Warning: could not mine initial blocks: %v\n%s\n", err, string(mineOut))
 		} else {
-			fmt.Println("Mined 101 blocks - wallet is funded!")
+			fmt.Println("Mined 110 blocks - wallet is funded!")
+		}
+
+		// Bootstrap a funded shielded UA so `zushi faucet --shielded` can
+		// just work. Without this, faucet falls into the
+		// findFundedAddress() ANY_TADDR / coinbase-t-addr fallback path,
+		// which trips zcashd's "no transparent change" / "ANY_TADDR
+		// excludes coinbase" / privacyPolicy rules in various combinations.
+		// With a pre-shielded UA in the wallet, faucet finds it via
+		// listaddresses and the z_sendmany is a clean shielded → shielded
+		// send. Idempotent: skips if any UA already holds funds (so
+		// stop/start cycles don't re-shield).
+		if err := bootstrapShieldedUA(); err != nil {
+			fmt.Printf("Warning: shielded bootstrap failed: %v\n", err)
+			fmt.Println("Transparent faucet still works; --shielded may need manual z_shieldcoinbase.")
 		}
 	}
 
@@ -139,6 +157,161 @@ showEndpoints:
 	}
 
 	return nil
+}
+
+// bootstrapShieldedUA ensures the wallet has at least one funded Unified
+// Address with an Orchard receiver, so `zushi faucet --shielded` can use
+// it as a shielded source for z_sendmany.
+//
+// Steps (only run if no UA already holds funds):
+//   1. z_getnewaccount                      → account 0 (or next free)
+//   2. z_getaddressforaccount <acct> [orchard] → Orchard UA
+//   3. z_shieldcoinbase * <UA>              → shield mature coinbase
+//      (privacyPolicy=AllowLinkingAccountAddresses required, otherwise
+//      zcashd refuses the implicit linking of multiple miner t-addrs;
+//      default AllowRevealedSenders is too strict for "*")
+//   4. Poll opid until success/fail
+//   5. generate 10 to confirm the shielding tx
+func bootstrapShieldedUA() error {
+	if walletHasFundedUA() {
+		fmt.Println("Shielded UA already funded — skipping bootstrap.")
+		return nil
+	}
+
+	fmt.Println("Bootstrapping shielded UA for faucet...")
+
+	// (1) account
+	if _, err := zcashCli("z_getnewaccount"); err != nil {
+		return fmt.Errorf("z_getnewaccount: %w", err)
+	}
+
+	// (2) UA. Pin to account 0; on a fresh wallet getnewaccount returns 0.
+	// On a wallet where bootstrap previously partially completed, account
+	// numbering may differ — but walletHasFundedUA() above would have
+	// short-circuited that case if the UA actually has balance.
+	uaOut, err := zcashCli("z_getaddressforaccount", "0", `["orchard"]`)
+	if err != nil {
+		return fmt.Errorf("z_getaddressforaccount: %w", err)
+	}
+	var uaResp struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal([]byte(uaOut), &uaResp); err != nil || uaResp.Address == "" {
+		return fmt.Errorf("parse UA response: %s", uaOut)
+	}
+	ua := uaResp.Address
+	fmt.Printf("Created shielded UA: %s\n", ua)
+
+	// (3) shield. Args: from, to, fee=null, limit=50, memo='',
+	// privacyPolicy=AllowLinkingAccountAddresses
+	shieldOut, err := zcashCli("z_shieldcoinbase", "*", ua,
+		"null", "50", "", "AllowLinkingAccountAddresses")
+	if err != nil {
+		return fmt.Errorf("z_shieldcoinbase: %w (%s)", err, shieldOut)
+	}
+	var shieldResp struct {
+		OpID            string  `json:"opid"`
+		ShieldingUTXOs  int     `json:"shieldingUTXOs"`
+		ShieldingValue  float64 `json:"shieldingValue"`
+	}
+	if err := json.Unmarshal([]byte(shieldOut), &shieldResp); err != nil {
+		return fmt.Errorf("parse shield response: %s", shieldOut)
+	}
+	fmt.Printf("Shielding %d coinbase utxos (%.2f ZEC), opid=%s\n",
+		shieldResp.ShieldingUTXOs, shieldResp.ShieldingValue, shieldResp.OpID)
+
+	// (4) poll
+	if err := waitForOpid(shieldResp.OpID, 60*time.Second); err != nil {
+		return fmt.Errorf("shield op: %w", err)
+	}
+
+	// (5) confirm
+	if _, err := zcashCli("generate", "10"); err != nil {
+		return fmt.Errorf("generate confirms: %w", err)
+	}
+
+	fmt.Println("Shielded UA funded and confirmed. `zushi faucet --shielded` ready.")
+	return nil
+}
+
+// walletHasFundedUA reports whether any UA in the wallet currently has a
+// positive balance. Used to make bootstrap idempotent across stop/start.
+func walletHasFundedUA() bool {
+	out, err := zcashCli("listaddresses")
+	if err != nil {
+		return false
+	}
+	var addrs []struct {
+		Unified []struct {
+			Addresses []struct {
+				Address string `json:"address"`
+			} `json:"addresses"`
+		} `json:"unified"`
+	}
+	if err := json.Unmarshal([]byte(out), &addrs); err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		for _, u := range a.Unified {
+			for _, addr := range u.Addresses {
+				if addr.Address == "" {
+					continue
+				}
+				balOut, err := zcashCli("z_getbalance", addr.Address)
+				if err != nil {
+					continue
+				}
+				var bal float64
+				fmt.Sscanf(strings.TrimSpace(balOut), "%f", &bal)
+				if bal > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// waitForOpid polls z_getoperationstatus until the operation succeeds,
+// fails, or the deadline passes.
+func waitForOpid(opid string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(1 * time.Second)
+		out, err := zcashCli("z_getoperationstatus", fmt.Sprintf(`["%s"]`, opid))
+		if err != nil {
+			continue
+		}
+		var ops []struct {
+			Status string `json:"status"`
+			Error  struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(out), &ops); err != nil || len(ops) == 0 {
+			continue
+		}
+		switch ops[0].Status {
+		case "success":
+			return nil
+		case "failed":
+			return fmt.Errorf("opid %s failed: %s", opid, ops[0].Error.Message)
+		}
+	}
+	return fmt.Errorf("opid %s timed out after %s", opid, timeout)
+}
+
+// zcashCli runs `docker exec zcashd zcash-cli -regtest ...args` and
+// returns trimmed stdout. Wraps the boilerplate scattered through the
+// other commands.
+func zcashCli(args ...string) (string, error) {
+	full := append([]string{"exec", "zcashd", "zcash-cli", "-regtest",
+		"-rpcuser=zcashrpc", "-rpcpassword=zcashpass"}, args...)
+	out, err := exec.Command("docker", full...).CombinedOutput()
+	if err != nil {
+		return strings.TrimSpace(string(out)), err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func spinner(done chan bool, message string) {
